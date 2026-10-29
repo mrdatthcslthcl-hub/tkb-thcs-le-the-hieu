@@ -1,0 +1,32 @@
+name: Update timetable data
+
+on:
+  workflow_dispatch:
+  schedule:
+    # 03:17 UTC = 10:17 Vietnam time; off the top of the hour.
+    - cron: '17 3 * * *'
+
+permissions:
+  contents: write
+
+jobs:
+  update:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install PDF reader
+        run: sudo apt-get update && sudo apt-get install -y poppler-utils
+      - name: Build static responses
+        run: python3 build_static.py
+      - name: Commit refreshed data
+        run: |
+          git config user.name 'TKB updater'
+          git config user.email 'ban@congty.com'
+          git add public
+          if ! git diff --cached --quiet; then
+            git commit -m 'Refresh timetable data'
+            git push origin HEAD:${{ github.ref_name }}
+          fi
