@@ -106,73 +106,60 @@ def words_by_page(pdf: bytes):
 
 
 def parse_pdf(pdf: bytes, pdf_url: str, title: str) -> dict:
+    match = re.search(r"tuần\s+(\d+).*?từ\s+(\d{1,2}/\d{1,2}/\d{4})", title, re.I)
+    if not match:
+        raise ValueError("Timetable title has no week and start date")
+    week = int(match.group(1))
+    start_date = datetime.strptime(match.group(2), "%d/%m/%Y").strftime("%d/%m/%Y")
     parsed: dict[str, dict] = {}
-    week = None
-    start_date = None
     for page_no, words in enumerate(words_by_page(pdf)):
-        heading = " ".join(t for x, y, t in sorted(words, key=lambda w: (round(w[1] / 5), w[0])) if 60 < y < 100)
-        match = WEEK_RE.search(heading)
-        if match:
-            page_week, page_start = match.groups()
-            if week is not None and (week, start_date) != (page_week, page_start):
-                raise ValueError("Pages disagree about week")
-            week, start_date = page_week, page_start
-        headers = sorted((x, t.split("-", 1)[0]) for x, y, t in words if 100 <= y < 116 and CLASS_RE.match(t))
-        first_row = sorted(x for x, y, t in words if 125 < x and 115 < y < 132)
-        if not headers or len(first_row) != len(headers):
-            raise ValueError(f"Page {page_no + 1}: class grid changed")
-        starts = first_row
-        day_anchors = sorted((y, int(t)) for x, y, t in words if 45 < x < 80 and y > 115 and t in {"2", "3", "4", "5", "6", "7"})
-        mornings = sorted(y for x, y, t in words if 75 < x < 105 and y > 115 and t == "Sáng")
-        periods = sorted((y, int(t)) for x, y, t in words if 108 < x < 125 and y > 115 and t in {"1", "2", "3", "4", "5"})
-        if len(day_anchors) != 6 or len(mornings) != 6 or len(periods) < 20:
-            raise ValueError(f"Page {page_no + 1}: timetable rows changed")
-        # Day labels are centered in tall merged cells; their y position is not
-        # a reliable boundary. Each morning's first period gives the boundary.
-        day_starts = []
-        for anchor, day in zip(mornings, range(2, 8)):
-            candidates = [y for y, period in periods if period == 1 and anchor - 45 < y < anchor]
-            if day == 7:
-                break  # Saturday is an unnumbered special activity in this PDF.
-            if not candidates:
-                raise ValueError(f"Page {page_no + 1}: missing morning for day {day}")
-            day_starts.append((min(candidates), day))
-        if [d for _, d in day_anchors] != list(range(2, 8)):
-            raise ValueError(f"Page {page_no + 1}: day labels changed")
-        period_rows = []
-        for index, (start, day) in enumerate(day_starts):
-            end = day_starts[index + 1][0] if index + 1 < len(day_starts) else mornings[-1] - 15
-            previous_period = 0
+        headers = sorted((x, t.split("-", 1)[0]) for x, y, t in words if 75 < y < 116 and CLASS_RE.match(t))
+        days = {int(t): y for x, y, t in words if 70 < x < 85 and t in {"2", "3", "4", "5", "6", "7"}}
+        periods = sorted((y, int(t)) for x, y, t in words if 130 < x < 145 and y > 100 and t in {"1", "2", "3", "4", "5"})
+        if not headers or set(days) != set(range(2, 8)) or len(periods) < 25:
+            raise ValueError(f"Page {page_no + 1}: timetable grid changed")
+        starts = {}
+        for day in range(2, 7):
+            candidates = [y for y, period in periods if period == 1 and days[day] - 45 < y < days[day] - 25]
+            if len(candidates) != 1:
+                raise ValueError(f"Page {page_no + 1}: missing start of day {day}")
+            starts[day] = candidates[0]
+        starts[7] = days[7] - 35
+        campus = "An Sơn" if any(t in {"SƠN,", "SƠN"} for _, y, t in words if y < 85) else "Trường Chính"
+        for _, code in headers:
+            if code in parsed:
+                raise ValueError(f"Duplicate class {code}")
+            parsed[code] = {"campus": campus, "days": {str(d): [] for d in range(2, 8)}}
+        for day in range(2, 7):
+            day_periods = [(y, period) for y, period in periods if starts[day] <= y < starts[day + 1]]
             session = "Sáng"
-            for y, period in periods:
-                if start <= y < end:
-                    if period < previous_period:
-                        session = "Chiều"
-                    period_rows.append((y, period, day, session))
-                    previous_period = period
-        campus = "An Sơn" if any(t == "SƠN," for _, y, t in words if y < 100) else "Trường Chính"
-        for i, (_, class_code) in enumerate(headers):
-            if class_code in parsed:
-                raise ValueError(f"Duplicate class {class_code}")
-            parsed[class_code] = {"campus": campus, "days": {str(d): [] for d in range(2, 8)}}
-            for row_index, (y, period, day, session) in enumerate(period_rows):
-                next_y = period_rows[row_index + 1][0] if row_index + 1 < len(period_rows) else y + 16
-                cell = sorted((wy, x, t) for x, wy, t in words if x > 125 and y - 1.5 <= wy < next_y - 1.5 and i == min(range(len(starts)), key=lambda j: abs(starts[j] - x)))
-                lines: list[list[str]] = []
-                line_y = None
-                for wy, _, token in cell:
-                    if line_y is None or abs(wy - line_y) > 2:
-                        lines.append([])
-                        line_y = wy
-                    lines[-1].append(token)
-                subject = " / ".join(" ".join(line) for line in lines).strip()
-                if subject:
-                    parsed[class_code]["days"][str(day)].append({"session": session, "period": period, "subject": subject})
-    if not week or not start_date or len(parsed) < 15:
+            previous = 0
+            for y, period in day_periods:
+                if period < previous:
+                    session = "Chiều"
+                previous = period
+                cells: dict[str, list[tuple[float, str]]] = {code: [] for _, code in headers}
+                for x, wy, token in words:
+                    if x < 150 or abs(wy - y) > 5.3 or "-" not in token:
+                        continue
+                    code = min(headers, key=lambda item: abs(item[0] - x))[1]
+                    cells[code].append((x, token))
+                # The merged activity rows between teaching days contain no
+                # class subjects and must not be treated as lessons.
+                if sum(bool(cell) for cell in cells.values()) < 2:
+                    continue
+                for code, cell in cells.items():
+                    if not cell:
+                        continue
+                    subjects = [token.split("-", 1)[0].strip() for _, token in sorted(cell)]
+                    subject = " / ".join(s for s in subjects if s)
+                    if subject:
+                        parsed[code]["days"][str(day)].append({"session": session, "period": period, "subject": subject})
+    if not start_date or len(parsed) < 15:
         raise ValueError("PDF has no complete timetable")
     if any(sum(map(len, item["days"].values())) < 15 for item in parsed.values()):
         raise ValueError("At least one class has too few lessons")
-    return {"week": int(week), "start_date": start_date, "title": title, "pdf_url": pdf_url, "classes": parsed}
+    return {"week": week, "start_date": start_date, "title": title, "pdf_url": pdf_url, "classes": parsed}
 
 
 def response(snapshot: dict, class_code: str, day: str | None = None) -> dict:
