@@ -16,6 +16,7 @@ from reportlab.pdfbase import pdfmetrics
 from reportlab.pdfbase.ttfonts import TTFont
 from reportlab.pdfgen import canvas as pdf_canvas
 from reportlab.platypus import Paragraph, Table, TableStyle
+from PIL import Image, ImageDraw, ImageFont
 
 
 FONT_DIR = Path("/usr/share/fonts/truetype/dejavu")
@@ -172,10 +173,95 @@ def render_class_png(snapshot: dict, code: str, path: Path) -> None:
 
 def render_teacher_png(snapshot: dict, name: str, full_name: str,
                        items: list[dict], path: Path) -> None:
-    rows_by_day = {str(day): [] for day in range(2, 8)}
-    for item in items:
-        rows_by_day[item["day"]].append(item)
-    _render_png(path, lambda canvas: _draw_grid(
-        canvas, title="LỊCH DẠY GIÁO VIÊN", name=full_name, snapshot=snapshot,
-        rows_by_day=rows_by_day, is_teacher=True,
-    ))
+    """Draw a narrow, readable weekly image for phone screens."""
+    width = 720
+    margin = 28
+    image = Image.new("RGB", (width, 10000), "#ffffff")
+    draw = ImageDraw.Draw(image)
+    regular = str(FONT_DIR / "DejaVuSans.ttf")
+    bold = str(FONT_DIR / "DejaVuSans-Bold.ttf")
+    font = lambda size, strong=False: ImageFont.truetype(bold if strong else regular, size)
+    title_font, name_font = font(25, True), font(38, True)
+    day_font, session_font = font(27, True), font(22, True)
+    lesson_font, period_font = font(30, True), font(24, True)
+    detail_font, note_font = font(23), font(18)
+    navy, blue, muted = "#153D55", "#17658A", "#4D6675"
+
+    def text_width(value: str, text_font) -> int:
+        return draw.textbbox((0, 0), value, font=text_font)[2]
+
+    def wrap(value: str, text_font, limit: int) -> list[str]:
+        lines, current = [], ""
+        for word in value.split():
+            candidate = f"{current} {word}".strip()
+            if current and text_width(candidate, text_font) > limit:
+                lines.append(current)
+                current = word
+            else:
+                current = candidate
+        return lines + ([current] if current else [])
+
+    y = 26
+    draw.text((margin, y), "LỊCH DẠY GIÁO VIÊN", fill=blue, font=title_font)
+    y += 45
+    for line in wrap(full_name, name_font, width - 2 * margin):
+        draw.text((margin, y), line, fill=navy, font=name_font)
+        y += 51
+    draw.text((margin, y + 1), f"Tuần {snapshot['week']} · Từ {snapshot['start_date']}",
+              fill=muted, font=detail_font)
+    y += 51
+    draw.line((margin, y, width - margin, y), fill=blue, width=3)
+
+    for day in range(2, 7):
+        daily = [item for item in items if item["day"] == str(day)]
+        daily.sort(key=lambda item: (item["session"] != "Sáng", item["period"], item["class"]))
+        y += 18
+        draw.rounded_rectangle((margin, y, width - margin, y + 47), radius=10, fill=blue)
+        draw.text((margin + 17, y + 7), f"THỨ {day}", fill="#ffffff", font=day_font)
+        y += 47
+        if not daily:
+            draw.text((margin + 17, y + 17), "Không có tiết dạy",
+                      fill=muted, font=detail_font)
+            y += 65
+            continue
+        for session_name in ("Sáng", "Chiều"):
+            scheduled = [item for item in daily if item["session"] == session_name]
+            if not scheduled:
+                continue
+            y += 6
+            session_fill = "#EAF5FA" if session_name == "Sáng" else "#FFF1DE"
+            session_text = blue if session_name == "Sáng" else "#955614"
+            draw.rectangle((margin, y, width - margin, y + 36), fill=session_fill)
+            draw.text((margin + 16, y + 5), session_name.upper(),
+                      fill=session_text, font=session_font)
+            y += 36
+            for item in scheduled:
+                row_top = y
+                draw.text((margin + 15, row_top + 22), f"Tiết {item['period']}",
+                          fill=muted, font=period_font)
+                label = f"{item['subject']}-{item['pdf_teacher']}"
+                if item["kind"] == "composite":
+                    label += "*"
+                label_font = lesson_font
+                while text_width(label, label_font) > width - margin - 176 and label_font.size > 23:
+                    label_font = font(label_font.size - 1, True)
+                draw.text((margin + 150, row_top + 7), label,
+                          fill=navy, font=label_font)
+                draw.text((margin + 150, row_top + 44), f"Lớp {item['class']}",
+                          fill=muted, font=detail_font)
+                y += 83
+                draw.line((margin, y, width - margin, y), fill="#DDE7EC", width=2)
+
+    if any(item["kind"] == "composite" for item in items):
+        y += 18
+        note = "* Tiết ghép được thống kê theo phân công; giáo viên trực tiếp dạy theo thông báo của nhà trường."
+        for line in wrap(note, note_font, width - 2 * margin):
+            draw.text((margin, y), line, fill=muted, font=note_font)
+            y += 27
+    y += 30
+    if y > image.height:
+        raise ValueError("Teacher timetable is too tall")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    image.crop((0, 0, width, y)).save(path, format="PNG", optimize=True)
+    if path.stat().st_size > 1_000_000:
+        raise ValueError("Teacher timetable PNG is unexpectedly large")
