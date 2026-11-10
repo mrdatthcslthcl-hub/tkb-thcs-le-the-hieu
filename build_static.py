@@ -19,7 +19,8 @@ from tkb_service import (PAGE_URL, fetch_latest, fetch_pdf_url, parse_pdf, respo
 
 OUTPUT = Path(__file__).with_name("public")
 MIRROR_URL = "https://tkb-thcs-le-the-hieu.web.simai.vn/tkb.json"
-DRIVE_FOLDER_ID = "1vMxNBQ635rnxOiyUjJKW3vADy9QoTMku"
+DRIVE_SOURCE_FOLDER_ID = "1q91aW6Ow7MdQ1PTVEsQsRgSE3K9P1721"
+DRIVE_BACKUP_FOLDER_ID = "1vMxNBQ635rnxOiyUjJKW3vADy9QoTMku"
 REPOSITORY = os.environ.get("GITHUB_REPOSITORY", "mrdatthcslthcl-hub/tkb-thcs-le-the-hieu")
 BRANCH = os.environ.get("GITHUB_REF_NAME", "main")
 IMAGE_BASE_URL = os.environ.get(
@@ -40,45 +41,50 @@ def load_recent_mirror() -> dict:
 
 
 def load_drive_pdf() -> dict:
-    """Read a shared original PDF when the school server blocks the runner."""
-    listing_url = f"https://drive.google.com/embeddedfolderview?id={DRIVE_FOLDER_ID}#list"
-    with urlopen(listing_url, timeout=20) as response:
-        listing = response.read().decode("utf-8", errors="replace")
-    matches = re.findall(
-        r'href="https://drive\.google\.com/file/d/([A-Za-z0-9_-]+)/view[^\"]*".*?'
-        r'<div class="flip-entry-title">([^<]+)</div>',
-        listing, re.DOTALL,
-    )
+    """Choose the newest readable weekly PDF, preferring the shared source folder."""
     candidates = []
-    for file_id, raw_name in matches:
-        name = unescape(raw_name)
-        if not name.lower().endswith(".pdf"):
-            continue
-        url = f"https://drive.google.com/uc?export=download&id={file_id}"
+    for priority, folder_id in enumerate((DRIVE_BACKUP_FOLDER_ID, DRIVE_SOURCE_FOLDER_ID)):
         try:
-            with urlopen(Request(url, headers={"User-Agent": "Mozilla/5.0"}), timeout=30) as response:
-                pdf = response.read(10_000_001)
-            if len(pdf) > 10_000_000 or not pdf.startswith(b"%PDF-"):
-                raise ValueError("Invalid or oversized PDF")
-            with tempfile.NamedTemporaryFile(suffix=".pdf") as temporary:
-                temporary.write(pdf)
-                temporary.flush()
-                content = subprocess.check_output(
-                    ["pdftotext", "-layout", temporary.name, "-"], timeout=20,
-                ).decode("utf-8", errors="replace")
-            heading = re.search(r"TUẦN\s+(\d+)\s+TỪ\s+NGÀY\s+(\d{1,2}/\d{1,2}/\d{4})", content, re.I)
-            if not heading:
-                raise ValueError("PDF has no readable timetable heading")
-            title = f"Thời khóa biểu tuần {heading.group(1)} - Từ {heading.group(2)}"
-            snapshot = parse_pdf(pdf, url, title)
-            start = datetime.strptime(snapshot["start_date"], "%d/%m/%Y").date()
-            if -4 <= (date.today() - start).days <= 13:
-                candidates.append((start, snapshot))
+            listing_url = f"https://drive.google.com/embeddedfolderview?id={folder_id}#list"
+            with urlopen(listing_url, timeout=20) as response:
+                listing = response.read().decode("utf-8", errors="replace")
         except Exception as exc:
-            print(f"Drive PDF {name} cannot be parsed: {exc}")
+            print(f"Drive folder {folder_id} cannot be listed: {exc}")
+            continue
+        matches = re.findall(
+            r'href="https://drive\.google\.com/file/d/([A-Za-z0-9_-]+)/view[^\"]*".*?'
+            r'<div class="flip-entry-title">([^<]+)</div>',
+            listing, re.DOTALL,
+        )
+        for file_id, raw_name in matches:
+            name = unescape(raw_name)
+            if not name.lower().endswith(".pdf"):
+                continue
+            url = f"https://drive.google.com/uc?export=download&id={file_id}"
+            try:
+                with urlopen(Request(url, headers={"User-Agent": "Mozilla/5.0"}), timeout=30) as response:
+                    pdf = response.read(10_000_001)
+                if len(pdf) > 10_000_000 or not pdf.startswith(b"%PDF-"):
+                    raise ValueError("Invalid or oversized PDF")
+                with tempfile.NamedTemporaryFile(suffix=".pdf") as temporary:
+                    temporary.write(pdf)
+                    temporary.flush()
+                    content = subprocess.check_output(
+                        ["pdftotext", "-layout", temporary.name, "-"], timeout=20,
+                    ).decode("utf-8", errors="replace")
+                heading = re.search(r"TUẦN\s+(\d+)\s+TỪ\s+NGÀY\s+(\d{1,2}/\d{1,2}/\d{4})", content, re.I)
+                if not heading:
+                    raise ValueError("PDF has no readable timetable heading")
+                title = f"Thời khóa biểu tuần {heading.group(1)} - Từ {heading.group(2)}"
+                snapshot = parse_pdf(pdf, url, title)
+                start = datetime.strptime(snapshot["start_date"], "%d/%m/%Y").date()
+                if -4 <= (date.today() - start).days <= 13:
+                    candidates.append((start, priority, snapshot))
+            except Exception as exc:
+                print(f"Drive PDF {name} cannot be parsed: {exc}")
     if not candidates:
         raise ValueError("No recent, readable PDF in the shared Drive folder")
-    return max(candidates, key=lambda item: item[0])[1]
+    return max(candidates, key=lambda item: (item[0], item[1]))[2]
 
 
 def write_json(path: Path, value: dict) -> None:
@@ -103,16 +109,16 @@ def image_response(title: str, image_url: str) -> dict:
 
 def main() -> None:
     try:
-        pdf, pdf_url, title = fetch_latest()
-        snapshot = parse_pdf(pdf, pdf_url, title)
-        source_mode = "school"
+        snapshot = load_drive_pdf()
+        source_mode = "drive_pdf"
     except Exception as exc:
-        print(f"School timetable unavailable: {exc}; trying the shared Drive folder")
+        print(f"Drive PDF unavailable: {exc}; trying the school timetable")
         try:
-            snapshot = load_drive_pdf()
-            source_mode = "drive_pdf"
-        except Exception as drive_exc:
-            print(f"Drive PDF unavailable: {drive_exc}; trying the published copy")
+            pdf, pdf_url, title = fetch_latest()
+            snapshot = parse_pdf(pdf, pdf_url, title)
+            source_mode = "school"
+        except Exception as school_exc:
+            print(f"School timetable unavailable: {school_exc}; trying the published copy")
             mirror = load_recent_mirror()
             try:
                 pdf = fetch_pdf_url(mirror["pdf_url"])
