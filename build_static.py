@@ -1,10 +1,14 @@
 """Precompute fast static Zalo Dynamic API replies from the latest school PDF."""
 
 from datetime import date, datetime
+from html import unescape
 import json
 import os
 from pathlib import Path
-from urllib.request import urlopen
+import re
+import subprocess
+import tempfile
+from urllib.request import Request, urlopen
 
 from render_tkb import render_class_png, render_teacher_png
 from tkb_service import (PAGE_URL, fetch_latest, fetch_pdf_url, parse_pdf, response,
@@ -15,6 +19,7 @@ from tkb_service import (PAGE_URL, fetch_latest, fetch_pdf_url, parse_pdf, respo
 
 OUTPUT = Path(__file__).with_name("public")
 MIRROR_URL = "https://tkb-thcs-le-the-hieu.web.simai.vn/tkb.json"
+DRIVE_FOLDER_ID = "1vMxNBQ635rnxOiyUjJKW3vADy9QoTMku"
 REPOSITORY = os.environ.get("GITHUB_REPOSITORY", "mrdatthcslthcl-hub/tkb-thcs-le-the-hieu")
 BRANCH = os.environ.get("GITHUB_REF_NAME", "main")
 IMAGE_BASE_URL = os.environ.get(
@@ -32,6 +37,48 @@ def load_recent_mirror() -> dict:
     if len(snapshot["classes"]) < 15 or not snapshot["pdf_url"].startswith("https://thcscamchinhcl.quangtri.edu.vn/"):
         raise ValueError("External timetable copy is incomplete")
     return snapshot
+
+
+def load_drive_pdf() -> dict:
+    """Read a shared original PDF when the school server blocks the runner."""
+    listing_url = f"https://drive.google.com/embeddedfolderview?id={DRIVE_FOLDER_ID}#list"
+    with urlopen(listing_url, timeout=20) as response:
+        listing = response.read().decode("utf-8", errors="replace")
+    matches = re.findall(
+        r'href="https://drive\.google\.com/file/d/([A-Za-z0-9_-]+)/view[^\"]*".*?'
+        r'<div class="flip-entry-title">([^<]+)</div>',
+        listing, re.DOTALL,
+    )
+    candidates = []
+    for file_id, raw_name in matches:
+        name = unescape(raw_name)
+        if not name.lower().endswith(".pdf"):
+            continue
+        url = f"https://drive.google.com/uc?export=download&id={file_id}"
+        try:
+            with urlopen(Request(url, headers={"User-Agent": "Mozilla/5.0"}), timeout=30) as response:
+                pdf = response.read(10_000_001)
+            if len(pdf) > 10_000_000 or not pdf.startswith(b"%PDF-"):
+                raise ValueError("Invalid or oversized PDF")
+            with tempfile.NamedTemporaryFile(suffix=".pdf") as temporary:
+                temporary.write(pdf)
+                temporary.flush()
+                content = subprocess.check_output(
+                    ["pdftotext", "-layout", temporary.name, "-"], timeout=20,
+                ).decode("utf-8", errors="replace")
+            heading = re.search(r"TUẦN\s+(\d+)\s+TỪ\s+NGÀY\s+(\d{1,2}/\d{1,2}/\d{4})", content, re.I)
+            if not heading:
+                raise ValueError("PDF has no readable timetable heading")
+            title = f"Thời khóa biểu tuần {heading.group(1)} - Từ {heading.group(2)}"
+            snapshot = parse_pdf(pdf, url, title)
+            start = datetime.strptime(snapshot["start_date"], "%d/%m/%Y").date()
+            if -4 <= (date.today() - start).days <= 13:
+                candidates.append((start, snapshot))
+        except Exception as exc:
+            print(f"Drive PDF {name} cannot be parsed: {exc}")
+    if not candidates:
+        raise ValueError("No recent, readable PDF in the shared Drive folder")
+    return max(candidates, key=lambda item: item[0])[1]
 
 
 def write_json(path: Path, value: dict) -> None:
@@ -60,16 +107,21 @@ def main() -> None:
         snapshot = parse_pdf(pdf, pdf_url, title)
         source_mode = "school"
     except Exception as exc:
-        print(f"School timetable unavailable: {exc}; trying the published copy")
-        mirror = load_recent_mirror()
+        print(f"School timetable unavailable: {exc}; trying the shared Drive folder")
         try:
-            pdf = fetch_pdf_url(mirror["pdf_url"])
-            snapshot = parse_pdf(pdf, mirror["pdf_url"], mirror["title"])
-            source_mode = "published_pdf"
-        except Exception as pdf_exc:
-            print(f"School PDF unavailable: {pdf_exc}; using the published data")
-            snapshot = mirror
-            source_mode = "published_copy"
+            snapshot = load_drive_pdf()
+            source_mode = "drive_pdf"
+        except Exception as drive_exc:
+            print(f"Drive PDF unavailable: {drive_exc}; trying the published copy")
+            mirror = load_recent_mirror()
+            try:
+                pdf = fetch_pdf_url(mirror["pdf_url"])
+                snapshot = parse_pdf(pdf, mirror["pdf_url"], mirror["title"])
+                source_mode = "published_pdf"
+            except Exception as pdf_exc:
+                print(f"School PDF unavailable: {pdf_exc}; using the published data")
+                snapshot = mirror
+                source_mode = "published_copy"
     teachers = teacher_schedules(snapshot)
     slugs = [teacher_slug(name) for name in teachers]
     if any(not slug for slug in slugs) or len(slugs) != len(set(slugs)):
