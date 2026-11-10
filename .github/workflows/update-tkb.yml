@@ -17,10 +17,17 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
-      - name: Install PDF reader
-        run: sudo apt-get update && sudo apt-get install -y poppler-utils
+      - name: Install PDF reader and fonts
+        run: sudo apt-get update && sudo apt-get install -y poppler-utils fonts-dejavu-core
+      - name: Install image renderer
+        run: python3 -m pip install -r requirements.txt
       - name: Build static responses
         run: python3 build_static.py
+      - name: Copy images to Google Drive
+        env:
+          DRIVE_UPLOAD_ENDPOINT: ${{ secrets.DRIVE_UPLOAD_ENDPOINT }}
+          DRIVE_UPLOAD_KEY: ${{ secrets.DRIVE_UPLOAD_KEY }}
+        run: python3 sync_drive.py
       - name: Commit refreshed data
         run: |
           git config user.name 'TKB updater'
