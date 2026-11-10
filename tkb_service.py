@@ -19,6 +19,7 @@ import subprocess
 import tempfile
 import threading
 import time
+import unicodedata
 from urllib.parse import parse_qs, urljoin, urlparse
 from urllib.request import urlopen
 from xml.etree import ElementTree
@@ -31,6 +32,84 @@ INTERMEDIATE_CA = Path(__file__).with_name("alphassl2025.pem")
 CLASS_RE = re.compile(r"^[6789][AB][123]-")
 CLASS_INPUT_RE = re.compile(r"^[6789][AB][123]$")
 WEEK_RE = re.compile(r"TUẦN\s+(\d+).*?(\d{2}/\d{2}/\d{4})", re.I)
+
+# Professional assignments effective 12/10/2026, supplied by the school.
+# Entries for a combined subject are candidates for a "..." cell; the PDF does
+# not identify which subsubject/teacher actually teaches that specific week.
+COMPOSITE_TEACHERS = {
+    "LSĐL": {
+        "Trường Chính": {"6": ("Kiếm",), "7": ("Kiếm", "P.Hải"),
+                         "8": ("Hân", "Hằng"), "9": ("Hân", "Hằng")},
+        "An Sơn": {"6": ("Hà", "Minh"), "7": ("Bình", "Minh"),
+                   "8": ("Hà", "Minh"), "9": ("Bình", "Minh")},
+    },
+    "KHTN": {
+        "Trường Chính": {"6": ("Vân", "Loan", "Nhàn"),
+                         "7": ("Vân", "Toàn", "Nhàn"),
+                         "8": ("Vân", "Loan", "Nhàn"),
+                         "9": ("Vân", "Toàn", "Nhàn")},
+        "An Sơn": {grade: ("Lan", "Thông", "Hiền") for grade in "6789"},
+    },
+}
+
+# Full names from the school's professional assignment dated 12/10/2026.
+TEACHER_FULL_NAMES = {
+    "Anh": "Nguyễn Nhật Anh", "Bình": "Nguyễn Thanh Bình",
+    "Chiến": "Hồ Xuân Chiến", "Chung": "Nguyễn Thành Chung",
+    "Giang": "Hoàng Thị Hương Giang", "H.Yến": "Phan Thị Hải Yến",
+    "Hiền": "Nguyễn Thị Thu Hiền", "Huệ": "Nguyễn Kim Huệ",
+    "Hà": "Nguyễn Thanh Hà", "Hân": "Lê Thị Ngọc Hân",
+    "Hòa": "Nguyễn Đức Hòa", "Hùng": "Lê Mậu Hùng",
+    "Hương": "Nguyễn Thị Hương", "Hậu": "Trần Thị Thanh Hậu",
+    "Hằng": "Lê Thị Thuý Hằng", "Khương": "Trần Hữu Khương",
+    "Kiếm": "Nguyễn Đình Kiếm", "Lan": "Trần Thị Nhị Lan",
+    "Loan": "Nguyễn Thị Loan", "Long": "Trần Xuân Long",
+    "Luyện": "Lê Thị Luyện", "Ly": "Trần Thị Mai Ly",
+    "M.Nhã": "Nguyễn Minh Nhã", "Minh": "Trần Thị Hồng Minh",
+    "Nghĩa": "Nguyễn Thị Nghĩa", "Nhung": "Đoàn Thị Kim Nhung",
+    "Nhàn": "Phan Thị Thanh Nhàn", "P.Hải": "Lê Phước Hải",
+    "Phước": "Nguyễn Ngọc Phước", "Phượng — An Sơn": "Nguyễn Thị Phượng",
+    "Phượng — Trường Chính": "Phạm Thị Kim Phượng",
+    "Quyên": "Trần Thị Quyên", "Quân": "Lê Hải Quân",
+    "T.Nhã": "Phan Thục Nhã", "Thiện": "Nguyễn Võ Thiện",
+    "Thông": "Trương Thị Thông", "Toàn": "Trần Thị Toàn",
+    "Trung": "Trần Kiên Trung", "Tỉnh": "Ngô Văn Tỉnh",
+    "Tứ": "Lê Văn Tứ", "Vân": "Nguyễn Thị Hải Vân",
+    "Vượng": "Nguyễn Quốc Vượng", "Đ.Hải": "Nguyễn Đức Hải",
+    "Đ.Yến": "Đoàn Thị Yến", "Đạt": "Phan Thế Đạt",
+}
+
+
+def teacher_display_name(key: str) -> str:
+    if key in TEACHER_FULL_NAMES:
+        return TEACHER_FULL_NAMES[key]
+    if " — " in key:
+        short, campus = key.rsplit(" — ", 1)
+        if short in TEACHER_FULL_NAMES:
+            return f"{TEACHER_FULL_NAMES[short]} — {campus}"
+    return key
+
+
+def teacher_slug(name: str) -> str:
+    """A stable URL segment for a teacher name printed in the source PDF."""
+    normalized = unicodedata.normalize("NFD", name.replace("Đ", "D").replace("đ", "d"))
+    ascii_name = "".join(ch for ch in normalized if unicodedata.category(ch) != "Mn")
+    return re.sub(r"[^a-z0-9]+", "-", ascii_name.lower()).strip("-")
+
+
+def subject_and_teacher(token: str) -> tuple[str, str | None]:
+    """Preserve the existing subject display; ignore redacted teacher cells."""
+    if token.startswith("GDĐP."):
+        subject, teacher = "GDĐP", token.split(".", 1)[1]
+    elif "-" in token:
+        subject, teacher = token.split("-", 1)
+    else:
+        return token.strip(), None
+    # Some school PDFs export Vietnamese ư as the legacy ƣ glyph.
+    teacher = teacher.strip().replace("ƣ", "ư").replace("Ƣ", "Ư")
+    if not teacher or "..." in teacher or "…" in teacher:
+        return subject.strip(), None
+    return subject.strip(), teacher
 
 
 class FirstPDF(HTMLParser):
@@ -83,11 +162,22 @@ def fetch_latest() -> tuple[bytes, str, str]:
     pdf_url = urljoin(PAGE_URL, parser.pdf_href)
     if urlparse(pdf_url).hostname != SOURCE_HOST:
         raise ValueError("PDF points outside the school site")
+    return fetch_pdf_url(pdf_url, context), pdf_url, " ".join(x for x in parser.title_parts if x)
+
+
+def fetch_pdf_url(pdf_url: str, context=None) -> bytes:
+    """Fetch a school PDF; also used when the listing page is unavailable."""
+    if urlparse(pdf_url).hostname != SOURCE_HOST or not urlparse(pdf_url).path.lower().endswith(".pdf"):
+        raise ValueError("PDF points outside the school site")
+    if context is None:
+        context = ssl.create_default_context()
+        if INTERMEDIATE_CA.exists():
+            context.load_verify_locations(cafile=str(INTERMEDIATE_CA))
     with urlopen(pdf_url, timeout=20, context=context) as response:
         pdf = response.read(10_000_001)
     if len(pdf) > 10_000_000 or not pdf.startswith(b"%PDF-"):
         raise ValueError("Invalid or oversized PDF")
-    return pdf, pdf_url, " ".join(x for x in parser.title_parts if x)
+    return pdf
 
 
 def words_by_page(pdf: bytes):
@@ -124,7 +214,9 @@ def parse_pdf(pdf: bytes, pdf_url: str, title: str) -> dict:
             if len(candidates) != 1:
                 raise ValueError(f"Page {page_no + 1}: missing start of day {day}")
             starts[day] = candidates[0]
-        starts[7] = days[7] - 35
+        # The Friday afternoon third period sits about 27 pt above the
+        # Saturday label. A 35 pt cutoff drops that row for every class.
+        starts[7] = days[7] - 20
         campus = "An Sơn" if any(t in {"SƠN,", "SƠN"} for _, y, t in words if y < 85) else "Trường Chính"
         for _, code in headers:
             if code in parsed:
@@ -140,7 +232,7 @@ def parse_pdf(pdf: bytes, pdf_url: str, title: str) -> dict:
                 previous = period
                 cells: dict[str, list[tuple[float, str]]] = {code: [] for _, code in headers}
                 for x, wy, token in words:
-                    if x < 150 or abs(wy - y) > 5.3 or "-" not in token:
+                    if x < 150 or abs(wy - y) > 5.3 or ("-" not in token and not token.startswith("GDĐP.")):
                         continue
                     code = min(headers, key=lambda item: abs(item[0] - x))[1]
                     cells[code].append((x, token))
@@ -151,15 +243,123 @@ def parse_pdf(pdf: bytes, pdf_url: str, title: str) -> dict:
                 for code, cell in cells.items():
                     if not cell:
                         continue
-                    subjects = [token.split("-", 1)[0].strip() for _, token in sorted(cell)]
+                    assignments = [subject_and_teacher(token) for _, token in sorted(cell)]
+                    subjects = [subject for subject, _ in assignments]
                     subject = " / ".join(s for s in subjects if s)
                     if subject:
-                        parsed[code]["days"][str(day)].append({"session": session, "period": period, "subject": subject})
+                        parsed[code]["days"][str(day)].append({
+                            "session": session, "period": period, "subject": subject,
+                            "teacher_assignments": [
+                                {"subject": part, "teacher": teacher}
+                                for part, teacher in assignments if part and teacher
+                            ],
+                        })
     if not start_date or len(parsed) < 15:
         raise ValueError("PDF has no complete timetable")
     if any(sum(map(len, item["days"].values())) < 15 for item in parsed.values()):
         raise ValueError("At least one class has too few lessons")
     return {"week": week, "start_date": start_date, "title": title, "pdf_url": pdf_url, "classes": parsed}
+
+
+def teacher_schedules(snapshot: dict) -> dict[str, list[dict]]:
+    """Index named lessons and candidate combined lessons separately."""
+    if not any("teacher_assignments" in lesson
+               for entry in snapshot["classes"].values()
+               for lessons in entry["days"].values() for lesson in lessons):
+        return {}  # Old published snapshots do not contain teacher metadata.
+    raw_schedules: dict[str, list[dict]] = {}
+    for code, entry in snapshot["classes"].items():
+        for day, lessons in entry["days"].items():
+            for lesson in lessons:
+                for assignment in lesson.get("teacher_assignments", []):
+                    name = assignment["teacher"]
+                    raw_schedules.setdefault(name, []).append({
+                        "day": day, "session": lesson["session"],
+                        "period": lesson["period"], "class": code,
+                        "campus": entry["campus"], "subject": assignment["subject"],
+                        "kind": "named", "pdf_teacher": name,
+                    })
+    schedules: dict[str, list[dict]] = {}
+    for name, items in raw_schedules.items():
+        if name == "Phượng" and len({item["campus"] for item in items}) > 1:
+            # The assignment sheet identifies two different teachers named Phượng.
+            for campus in sorted({item["campus"] for item in items}):
+                schedules[f"{name} — {campus}"] = [item for item in items if item["campus"] == campus]
+        else:
+            # A/B class codes already identify the school site for one teacher.
+            schedules[name] = items
+    for lesson in unresolved_composite_lessons(snapshot):
+        candidates = COMPOSITE_TEACHERS.get(lesson["subject"], {}).get(
+            lesson["campus"], {}).get(lesson["class"][0], ())
+        for name in candidates:
+            schedule_key = name if name in schedules else f"{name} — {lesson['campus']}"
+            if schedule_key not in schedules:
+                continue  # A changed staff roster needs explicit verification.
+            schedules[schedule_key].append({**lesson, "kind": "composite", "pdf_teacher": "..."})
+    return schedules
+
+
+def unresolved_composite_lessons(snapshot: dict) -> list[dict]:
+    """Periods whose combined subject is known but teacher/subsubject is not."""
+    unresolved = []
+    for code, entry in snapshot["classes"].items():
+        for day, lessons in entry["days"].items():
+            for lesson in lessons:
+                if lesson["subject"] in {"LSĐL", "KHTN"} and not lesson.get("teacher_assignments"):
+                    unresolved.append({"class": code, "campus": entry["campus"], "day": day,
+                                       "session": lesson["session"], "period": lesson["period"],
+                                       "subject": lesson["subject"]})
+    return sorted(unresolved, key=lambda x: (int(x["day"]), x["session"] != "Sáng", x["period"], x["class"]))
+
+
+def unresolved_response(snapshot: dict) -> dict:
+    items = unresolved_composite_lessons(snapshot)
+    lines = [f"Tiết ghép phân môn theo thông báo GV — tuần {snapshot['week']}, từ {snapshot['start_date']}"]
+    for item in items:
+        lines.append(f"Thứ {item['day']} {item['session'].lower()} tiết {item['period']}: {item['subject']} — {item['class']}")
+    if not items:
+        lines.append("Không có tiết ghép chưa rõ giáo viên trong PDF hiện tại.")
+    lines.append("Những tiết này được tính cho các GV phân môn theo bảng phân công; GV trực tiếp dạy trong tuần theo thông báo của nhà trường/GV.")
+    return {"version": "chatbot", "content": {"messages": [{"type": "text", "text": "\n".join(lines)}]}}
+
+
+def teacher_response(snapshot: dict, teacher: str, day: str | None = None) -> dict:
+    schedules = teacher_schedules(snapshot)
+    start = datetime.strptime(snapshot["start_date"], "%d/%m/%Y").date()
+    if (date.today() - start).days > 13:
+        message = "Chưa xác nhận được thời khóa biểu mới. Anh/chị vui lòng xem tệp mới nhất trên trang trường."
+    elif teacher not in schedules:
+        message = "Em chưa tìm thấy tên giáo viên này trong thời khóa biểu. Anh/chị kiểm tra lại tên trên PDF gốc."
+    else:
+        chosen = [item for item in schedules[teacher] if day is None or item["day"] == day]
+        chosen.sort(key=lambda item: (int(item["day"]), item["session"] != "Sáng", item["period"], item["class"]))
+        lines = [f"Lịch dạy GV {teacher_display_name(teacher)}\nTuần {snapshot['week']}, từ {snapshot['start_date']}"]
+        composite_count = sum(item["kind"] == "composite" for item in chosen)
+        if not chosen:
+            lines.append(f"Thứ {day}: không có tiết dạy trong TKB.")
+        else:
+            last_day = None
+            named_at_slot = {
+                (item["day"], item["session"], item["period"]): item["class"]
+                for item in schedules[teacher] if item["kind"] == "named"
+            }
+            for item in chosen:
+                if item["day"] != last_day:
+                    last_day = item["day"]
+                    lines.append(f"Thứ {last_day}:")
+                suffix = ""
+                if item["kind"] == "composite":
+                    clash = named_at_slot.get((item["day"], item["session"], item["period"]))
+                    suffix = (f" (tiết ghép; trùng tiết ghi tên ở {clash}, cần xác nhận)" if clash and clash != item["class"]
+                              else " (tiết ghép, GV thực dạy theo thông báo)")
+                lines.append(f"{item['session']} tiết {item['period']}: {item['subject']}-{item['pdf_teacher']} — {item['class']}{suffix}")
+        if composite_count:
+            lines.append("Tiết ghép được thống kê cho các GV phân môn liên quan; đây chưa phải xác nhận ai trực tiếp dạy tuần này.")
+        message = "\n".join(lines)
+    return {
+        "version": "chatbot",
+        "content": {"messages": [{"type": "text", "text": message, "buttons": [{"name": "Xem TKB chung", "type": "url", "url": PAGE_URL}]}]},
+    }
 
 
 def response(snapshot: dict, class_code: str, day: str | None = None) -> dict:
@@ -171,7 +371,7 @@ def response(snapshot: dict, class_code: str, day: str | None = None) -> dict:
         message = "Em chưa tìm thấy lớp này trong thời khóa biểu mới nhất. Anh/chị kiểm tra lại mã lớp (ví dụ 7A2) hoặc xem tệp gốc."
     else:
         entry = snapshot["classes"][class_code]
-        heading = f"TKB lớp {class_code} — {entry['campus']}\nTuần {snapshot['week']}, từ {snapshot['start_date']}"
+        heading = f"TKB lớp {class_code}\nTuần {snapshot['week']}, từ {snapshot['start_date']}"
         day_list = [day] if day in {"2", "3", "4", "5", "6", "7"} else [str(d) for d in range(2, 8)]
         lines = [heading]
         for d in day_list:
@@ -184,7 +384,7 @@ def response(snapshot: dict, class_code: str, day: str | None = None) -> dict:
         message = "\n".join(lines)
     return {
         "version": "chatbot",
-        "content": {"messages": [{"type": "text", "text": message, "buttons": [{"name": "Xem tệp gốc", "type": "url", "url": snapshot["pdf_url"]}]}]},
+        "content": {"messages": [{"type": "text", "text": message, "buttons": [{"name": "Xem TKB chung", "type": "url", "url": PAGE_URL}]}]},
     }
 
 
