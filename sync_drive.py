@@ -15,6 +15,7 @@ from urllib.request import Request, urlopen
 PUBLIC = Path(__file__).with_name("public")
 INDEX = PUBLIC / "drive-index.json"
 ROOT_FOLDER_ID = "1vMxNBQ635rnxOiyUjJKW3vADy9QoTMku"
+CURRENT_FOLDER = "TKB-moi-nhat"
 
 
 def folder_entries(folder_id: str) -> list[tuple[str, str, str]]:
@@ -30,12 +31,12 @@ def folder_entries(folder_id: str) -> list[tuple[str, str, str]]:
     ]
 
 
-def image_folders(week: str) -> dict[str, str]:
-    week_id = next((file_id for kind, file_id, name in folder_entries(ROOT_FOLDER_ID)
-                    if kind == "drive/folders" and name == week), None)
-    if not week_id:
+def image_folders() -> dict[str, str]:
+    current_id = next((file_id for kind, file_id, name in folder_entries(ROOT_FOLDER_ID)
+                       if kind == "drive/folders" and name == CURRENT_FOLDER), None)
+    if not current_id:
         return {}
-    return {name: file_id for kind, file_id, name in folder_entries(week_id)
+    return {name: file_id for kind, file_id, name in folder_entries(current_id)
             if kind == "drive/folders" and name in {"lop", "gv"}}
 
 
@@ -97,9 +98,10 @@ def main() -> None:
                for group_paths in paths.values() for path in group_paths}
     missing = {group: [path for path in group_paths if
                        entries.get(path.relative_to(PUBLIC).as_posix(), {}).get("sha256") != digests[path]
+                       or entries.get(path.relative_to(PUBLIC).as_posix(), {}).get("folder") != CURRENT_FOLDER
                        or not entries.get(path.relative_to(PUBLIC).as_posix(), {}).get("view_url")]
                for group, group_paths in paths.items()}
-    folders = image_folders(week) if any(missing.values()) else {}
+    folders = image_folders() if any(missing.values()) else {}
     known = {group: scan_existing(folders[group], {path.name for path in group_paths})
              if group_paths and group in folders else {}
              for group, group_paths in missing.items()}
@@ -109,7 +111,8 @@ def main() -> None:
             relative = path.relative_to(PUBLIC).as_posix()
             digest = digests[path]
             previous = entries.get(relative, {})
-            if previous.get("sha256") == digest and previous.get("view_url"):
+            if (previous.get("sha256") == digest and previous.get("folder") == CURRENT_FOLDER
+                    and previous.get("view_url")):
                 view_url = previous["view_url"]
                 reused += 1
             else:
@@ -141,7 +144,7 @@ def main() -> None:
                             if attempt:
                                 time.sleep(2)
                             if group not in folders:
-                                folders = image_folders(week)
+                                folders = image_folders()
                             if group in folders:
                                 found = scan_existing(folders[group], {path.name})
                                 file_id = found.get((path.name, digest))
@@ -153,7 +156,8 @@ def main() -> None:
                             continue
                         recovered += 1
                 view_url = f"https://drive.google.com/file/d/{file_id}/view"
-                entries[relative] = {"sha256": digest, "view_url": view_url, "id": file_id}
+                entries[relative] = {"sha256": digest, "view_url": view_url,
+                                     "id": file_id, "folder": CURRENT_FOLDER}
             response_path = (PUBLIC / f"{path.stem}.json" if group == "lop"
                              else PUBLIC / "gv" / f"{path.stem}.json")
             update_button(response_path, view_url)
