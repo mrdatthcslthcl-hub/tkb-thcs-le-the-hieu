@@ -116,9 +116,15 @@ def _draw_grid(canvas, *, title: str, name: str, snapshot: dict,
         style += [
             ("FONTNAME", (0, 1), (-1, -1), "DejaVuBold"),
             ("FONTSIZE", (0, 1), (1, -1), 10),
-            ("FONTSIZE", (2, 1), (-1, -1), 10),
             ("TEXTCOLOR", (2, 1), (-1, -1), NAVY),
         ]
+        subject_width = (table_width - 110) / 5 - 12
+        for row_index, row in enumerate(rows[1:], start=1):
+            for col_index, subject in enumerate(row[2:], start=2):
+                size = 16.5
+                while size > 10 and pdfmetrics.stringWidth(subject, "DejaVuBold", size) > subject_width:
+                    size -= 0.5
+                style.append(("FONTSIZE", (col_index, row_index), (col_index, row_index), size))
     table = Table(rows, colWidths=[65, 45] + [(table_width - 110) / 5] * 5,
                   rowHeights=row_heights)
     table.setStyle(TableStyle(style))
