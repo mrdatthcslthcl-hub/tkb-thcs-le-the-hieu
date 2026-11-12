@@ -203,14 +203,14 @@ def parse_pdf(pdf: bytes, pdf_url: str, title: str) -> dict:
     start_date = datetime.strptime(match.group(2), "%d/%m/%Y").strftime("%d/%m/%Y")
     parsed: dict[str, dict] = {}
     for page_no, words in enumerate(words_by_page(pdf)):
-        headers = sorted((x, t.split("-", 1)[0]) for x, y, t in words if 75 < y < 116 and CLASS_RE.match(t))
+        headers = sorted((x, t.split("-", 1)[0]) for x, y, t in words if 75 < y < 180 and CLASS_RE.match(t))
         days = {int(t): y for x, y, t in words if 70 < x < 85 and t in {"2", "3", "4", "5", "6", "7"}}
         periods = sorted((y, int(t)) for x, y, t in words if 130 < x < 145 and y > 100 and t in {"1", "2", "3", "4", "5"})
         if not headers or set(days) != set(range(2, 8)) or len(periods) < 25:
             raise ValueError(f"Page {page_no + 1}: timetable grid changed")
         starts = {}
         for day in range(2, 7):
-            candidates = [y for y, period in periods if period == 1 and days[day] - 45 < y < days[day] - 25]
+            candidates = [y for y, period in periods if period == 1 and days[day] - 60 < y < days[day] - 25]
             if len(candidates) != 1:
                 raise ValueError(f"Page {page_no + 1}: missing start of day {day}")
             starts[day] = candidates[0]
