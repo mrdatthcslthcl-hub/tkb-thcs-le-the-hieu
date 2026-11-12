@@ -2,6 +2,7 @@
 
 from datetime import date, datetime
 from html import unescape
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -78,7 +79,7 @@ def load_drive_pdf() -> dict:
                 title = f"Thời khóa biểu tuần {heading.group(1)} - Từ {heading.group(2)}"
                 snapshot = parse_pdf(pdf, url, title)
                 start = datetime.strptime(snapshot["start_date"], "%d/%m/%Y").date()
-                if -4 <= (date.today() - start).days <= 13:
+                if -7 <= (date.today() - start).days <= 13:
                     candidates.append((start, priority, snapshot))
             except Exception as exc:
                 print(f"Drive PDF {name} cannot be parsed: {exc}")
@@ -89,6 +90,18 @@ def load_drive_pdf() -> dict:
 
 def write_json(path: Path, value: dict) -> None:
     path.write_text(json.dumps(value, ensure_ascii=False, separators=(",", ":")), encoding="utf-8")
+
+
+def timetable_fingerprint(snapshot: dict) -> str:
+    """Stable digest of the timetable content, including teacher assignments."""
+    content = {
+        "week": snapshot["week"],
+        "start_date": snapshot["start_date"],
+        "classes": snapshot["classes"],
+    }
+    encoded = json.dumps(content, ensure_ascii=False, sort_keys=True,
+                         separators=(",", ":")).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
 
 
 def unavailable_teacher_response(name: str) -> dict:
@@ -136,7 +149,7 @@ def main() -> None:
     start = datetime.strptime(snapshot["start_date"], "%d/%m/%Y").date()
     image_folder = f"anh/{start.isoformat()}-tuan-{snapshot['week']}"
     images_dir = OUTPUT / image_folder
-    fresh = 0 <= (date.today() - start).days <= 13
+    fresh = -7 <= (date.today() - start).days <= 13
     for code in sorted(snapshot["classes"]):
         if fresh:
             relative = f"{image_folder}/lop/{code}.png"
@@ -204,9 +217,12 @@ def main() -> None:
     # This changes once a week even during holidays, keeping the scheduled
     # workflow active while avoiding a Render deploy every day.
     year, week, _ = date.today().isocalendar()
+    # This represents the published timetable itself, not the PDF URL or the
+    # time of the scheduled check. A replaced PDF at the same URL is detected.
     write_json(OUTPUT / "status.json", {
         "week": snapshot["week"],
         "starts": snapshot["start_date"],
+        "timetable_fingerprint": timetable_fingerprint(snapshot),
         "source": snapshot["pdf_url"],
         "update_source": source_mode,
         "checked_iso_week": f"{year}-{week:02d}",
