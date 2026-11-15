@@ -89,6 +89,35 @@ def teacher_file_names(paths: list[Path]) -> dict[Path, str]:
             for path in paths}
 
 
+def point_responses_to_drive(paths: dict[str, list[Path]], entries: dict) -> None:
+    """Publish only current-week image replies after every Drive upload succeeds."""
+    updates = []
+    for group, group_paths in paths.items():
+        for image_path in group_paths:
+            relative = image_path.relative_to(PUBLIC).as_posix()
+            item = entries.get(relative, {})
+            file_id = item.get("id")
+            view_url = item.get("view_url")
+            if not file_id or not view_url:
+                raise RuntimeError(f"No Drive image for {relative}")
+            reply_path = (PUBLIC / f"{image_path.stem}.json" if group == "lop"
+                          else PUBLIC / "gv" / f"{image_path.stem}.json")
+            reply = json.loads(reply_path.read_text(encoding="utf-8"))
+            messages = reply["content"]["messages"]
+            if len(messages) < 2 or messages[1].get("type") != "image":
+                raise RuntimeError(f"Image reply is missing from {reply_path}")
+            image_url = f"https://drive.google.com/uc?export=view&id={file_id}"
+            for button in messages[0].get("buttons", []):
+                if button.get("name") == "Mở ảnh TKB":
+                    button["url"] = view_url
+            messages[1]["image_url"] = image_url
+            updates.append((reply_path, reply))
+    for reply_path, reply in updates:
+        reply_path.write_text(json.dumps(reply, ensure_ascii=False,
+                                         separators=(",", ":")), encoding="utf-8")
+    print(f"Drive image replies updated: {len(updates)}")
+
+
 def main() -> None:
     endpoint = os.environ.get("DRIVE_UPLOAD_ENDPOINT", "").strip()
     key = os.environ.get("DRIVE_UPLOAD_KEY", "").strip()
@@ -192,6 +221,7 @@ def main() -> None:
           f"{reused} unchanged, {failed} failed")
     if failed:
         raise RuntimeError(f"{failed} timetable images could not be synced to Drive")
+    point_responses_to_drive(paths, entries)
 
 
 if __name__ == "__main__":
