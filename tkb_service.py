@@ -229,7 +229,13 @@ def parse_pdf(pdf: bytes, pdf_url: str, title: str) -> dict:
         # The Friday afternoon third period sits about 27 pt above the
         # Saturday label. A 35 pt cutoff drops that row for every class.
         starts[7] = days[7] - 20
-        campus = "An Sơn" if any(t in {"SƠN,", "SƠN"} for _, y, t in words if y < 85) else "Trường Chính"
+        # The An Sơn title can shift down on later pages. Locate it above the
+        # class headings instead of relying on a fixed page coordinate.
+        first_class_y = min(y for _, y, t in words if CLASS_RE.match(t))
+        campus = "An Sơn" if any(
+            t in {"SƠN,", "SƠN"} and x > 500 and y < first_class_y
+            for x, y, t in words
+        ) else "Trường Chính"
         for _, code in headers:
             if code in parsed:
                 raise ValueError(f"Duplicate class {code}")
