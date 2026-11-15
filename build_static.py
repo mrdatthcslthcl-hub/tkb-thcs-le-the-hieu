@@ -150,6 +150,18 @@ def main() -> None:
     image_folder = f"anh/{start.isoformat()}-tuan-{snapshot['week']}"
     images_dir = OUTPUT / image_folder
     fresh = -7 <= (date.today() - start).days <= 13
+    if fresh:
+        # A corrected PDF can change teacher slugs within the same week.
+        # Remove PNGs for names no longer in the snapshot before Drive sync
+        # checks that image counts match the current timetable.
+        expected_images = {
+            "lop": {f"{code}.png" for code in snapshot["classes"]},
+            "gv": {f"{slug}.png" for slug in slugs},
+        }
+        for group, names in expected_images.items():
+            for old_image in (images_dir / group).glob("*.png"):
+                if old_image.name not in names:
+                    old_image.unlink()
     for code in sorted(snapshot["classes"]):
         if fresh:
             relative = f"{image_folder}/lop/{code}.png"
