@@ -79,6 +79,14 @@ TEACHER_FULL_NAMES = {
     "Đ.Yến": "Đoàn Thị Yến", "Đạt": "Phan Thế Đạt",
 }
 
+# PCCM học kỳ I ngày 12/10/2026: phân môn Nghệ thuật của từng giáo viên.
+ART_SUBJECT_BY_TEACHER = {
+    "Nghĩa": "Âm nhạc",
+    "Phượng": "Âm nhạc",
+    "Quyên": "Mĩ thuật",
+    "Nhung": "Mĩ thuật",
+}
+
 
 def teacher_display_name(key: str) -> str:
     if key in TEACHER_FULL_NAMES:
@@ -109,6 +117,8 @@ def subject_and_teacher(token: str) -> tuple[str, str | None]:
     teacher = teacher.strip().replace("ƣ", "ư").replace("Ƣ", "Ư")
     if not teacher or "..." in teacher or "…" in teacher:
         return subject.strip(), None
+    if subject.strip() == "NT" and teacher in ART_SUBJECT_BY_TEACHER:
+        subject = f"NT-{ART_SUBJECT_BY_TEACHER[teacher]}"
     return subject.strip(), teacher
 
 
@@ -203,13 +213,15 @@ def parse_pdf(pdf: bytes, pdf_url: str, title: str) -> dict:
     start_date = datetime.strptime(match.group(2), "%d/%m/%Y").strftime("%d/%m/%Y")
     parsed: dict[str, dict] = {}
     for page_no, words in enumerate(words_by_page(pdf)):
-        headers = sorted((x, t.split("-", 1)[0]) for x, y, t in words if 75 < y < 180 and CLASS_RE.match(t))
+        headers = sorted((x, t.split("-", 1)[0]) for x, y, t in words if 75 < y < 175 and CLASS_RE.match(t))
         days = {int(t): y for x, y, t in words if 70 < x < 85 and t in {"2", "3", "4", "5", "6", "7"}}
         periods = sorted((y, int(t)) for x, y, t in words if 130 < x < 145 and y > 100 and t in {"1", "2", "3", "4", "5"})
         if not headers or set(days) != set(range(2, 8)) or len(periods) < 25:
             raise ValueError(f"Page {page_no + 1}: timetable grid changed")
         starts = {}
         for day in range(2, 7):
+            # Friday's heading can sit lower when the preceding afternoon has
+            # an extra merged activity row (about 53 pt instead of 34 pt).
             candidates = [y for y, period in periods if period == 1 and days[day] - 60 < y < days[day] - 25]
             if len(candidates) != 1:
                 raise ValueError(f"Page {page_no + 1}: missing start of day {day}")
