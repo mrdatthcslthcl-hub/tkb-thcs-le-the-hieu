@@ -215,7 +215,7 @@ def parse_pdf(pdf: bytes, pdf_url: str, title: str) -> dict:
     for page_no, words in enumerate(words_by_page(pdf)):
         headers = sorted((x, t.split("-", 1)[0]) for x, y, t in words if 75 < y < 175 and CLASS_RE.match(t))
         days = {int(t): y for x, y, t in words if 70 < x < 85 and t in {"2", "3", "4", "5", "6", "7"}}
-        periods = sorted((y, int(t)) for x, y, t in words if 130 < x < 145 and y > 100 and t in {"1", "2", "3", "4", "5"})
+        periods = sorted((y, int(t)) for x, y, t in words if 130 < x < 160 and y > 100 and t in {"1", "2", "3", "4", "5"})
         if not headers or set(days) != set(range(2, 8)) or len(periods) < 25:
             raise ValueError(f"Page {page_no + 1}: timetable grid changed")
         starts = {}
