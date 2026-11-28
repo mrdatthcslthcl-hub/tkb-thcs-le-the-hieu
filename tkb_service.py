@@ -115,6 +115,9 @@ def subject_and_teacher(token: str) -> tuple[str, str | None]:
         return token.strip(), None
     # Some school PDFs export Vietnamese ư as the legacy ƣ glyph.
     teacher = teacher.strip().replace("ƣ", "ư").replace("Ƣ", "Ư")
+    # Week 13 PDF prints one of Bình's lessons without its accent.
+    if teacher == "Binh":
+        teacher = "Bình"
     if not teacher or "..." in teacher or "…" in teacher:
         return subject.strip(), None
     if subject.strip() == "NT" and teacher in ART_SUBJECT_BY_TEACHER:
